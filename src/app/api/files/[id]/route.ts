@@ -142,16 +142,30 @@ export async function PATCH(req: Request, { params }: Ctx) {
   return json({ id: updated.id, originalName: updated.originalName });
 }
 
-// Delete an uploaded file. If usages still reference it, refuse with 409 and the
-// reference count unless ?force=1, in which case the references are stripped from
-// those usages first so they don't point at a missing file.
+// Delete an uploaded or generated file (session or API key).
+//
+// GENERATED: removes the image bytes, the file row AND the ImageGeneration
+// record that produced it, as if it was never generated.
+//
+// UPLOAD: if usages still reference it, refuse with 409 and the reference count
+// unless ?force=1, in which case the references are stripped from those usages
+// first so they don't point at a missing file.
 export async function DELETE(req: Request, { params }: Ctx) {
-  const userId = await sessionUserId();
+  const userId = await callerId(req);
   if (!userId) return unauthorized();
   const { id } = await params;
 
-  const file = await prisma.storedFile.findFirst({ where: { id, userId, kind: "UPLOAD" } });
+  const file = await prisma.storedFile.findFirst({
+    where: { id, userId, kind: { in: ["UPLOAD", "GENERATED"] } },
+    select: { kind: true },
+  });
   if (!file) return notFound();
+
+  if (file.kind === "GENERATED") {
+    await prisma.imageGeneration.deleteMany({ where: { fileId: id, userId } });
+    await deleteFile(id);
+    return json({ ok: true });
+  }
 
   const force = new URL(req.url).searchParams.get("force") === "1";
   const refs = await usagesReferencing(userId, id);
